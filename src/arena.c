@@ -1480,9 +1480,10 @@ static mi_arena_pages_t* mi_arena_pages_alloc(mi_arena_t* arena) {
 
 static mi_arena_t* mi_arena_initialize(mi_subproc_t* subproc, void* start,
                                         size_t slice_count, mi_arena_t* parent, size_t total_size,
-                                        int numa_node, bool exclusive,
+                                        int numa_node, bool exclusive, bool allow_large,
                                         mi_memid_t memid, mi_commit_fun_t* commit_fun, void* commit_fun_arg, mi_arena_id_t* arena_id)
 {
+  MI_UNUSED(allow_large);
   mi_assert_internal(_mi_is_aligned(start,MI_ARENA_SLICE_ALIGN));
   mi_assert_internal(mi_size_of_slices(slice_count)>=MI_ARENA_MIN_SIZE);
 
@@ -1493,7 +1494,16 @@ static mi_arena_t* mi_arena_initialize(mi_subproc_t* subproc, void* start,
   }
 
   size_t bitmap_base;
-  const size_t info_slices = mi_arena_info_slices_needed(slice_count, &bitmap_base);
+  size_t info_slices = mi_arena_info_slices_needed(slice_count, &bitmap_base);
+  #if defined(__linux__) && MI_SECURE == 0 && !defined(MI_NO_THP)
+  const size_t large_page_size = _mi_os_large_page_size();
+  const bool small_meta = (allow_large && memid.initially_committed && memid.memkind == MI_MEM_OS && !memid.is_pinned && commit_fun == NULL &&
+                          large_page_size > MI_ARENA_SLICE_SIZE && mi_option_is_enabled(mi_option_allow_thp));
+  if (small_meta) {
+    const uintptr_t end = (uintptr_t)start + mi_size_of_slices(info_slices);
+    info_slices += mi_slice_count_of_size(_mi_align_up(end, large_page_size) - end);
+  }
+  #endif
   if (slice_count < info_slices+1) {
     _mi_warning_message("cannot use OS memory since it is not large enough (size %zu KiB, minimum required is %zu KiB)", mi_size_of_slices(slice_count)/MI_KiB, mi_size_of_slices(info_slices+1)/MI_KiB);
     return NULL;
@@ -1503,6 +1513,9 @@ static mi_arena_t* mi_arena_initialize(mi_subproc_t* subproc, void* start,
     return NULL;
   }
 
+  #if defined(__linux__) && MI_SECURE == 0 && !defined(MI_NO_THP)
+  if (small_meta) { (void)_mi_prim_avoid_large_pages(start, mi_size_of_slices(info_slices)); }
+  #endif
   mi_arena_t* arena = (mi_arena_t*)start;
 
   // commit & zero if needed
@@ -1580,7 +1593,7 @@ static mi_arena_t* mi_arena_initialize(mi_subproc_t* subproc, void* start,
   return arena;
 }
 
-static bool mi_manage_os_memory_ex2(mi_subproc_t* subproc, void* start, size_t size, int numa_node, bool exclusive,
+static bool mi_manage_os_memory_ex2(mi_subproc_t* subproc, void* start, size_t size, int numa_node, bool exclusive, bool allow_large,
   mi_memid_t memid, mi_commit_fun_t* commit_fun, void* commit_fun_arg, mi_arena_id_t* arena_id) mi_attr_noexcept
 {
   // checks
@@ -1619,7 +1632,7 @@ static bool mi_manage_os_memory_ex2(mi_subproc_t* subproc, void* start, size_t s
 
     // initialize
     mi_arena_t* arena = mi_arena_initialize( subproc, start, slice_count, parent,
-                                              (parent==NULL ? total_size : 0), numa_node, exclusive,
+                                              (parent==NULL ? total_size : 0), numa_node, exclusive, allow_large,
                                               memid, commit_fun, commit_fun_arg,
                                               (parent==NULL ? arena_id : NULL));
     if (arena==NULL) {
@@ -1657,7 +1670,7 @@ bool mi_manage_os_memory_ex(void* start, size_t size, bool is_committed, bool is
   memid.initially_committed = is_committed;
   memid.initially_zero = is_zero;
   memid.is_pinned = is_pinned;
-  return mi_manage_os_memory_ex2(_mi_subproc(), start, size, numa_node, exclusive, memid, NULL, NULL, arena_id);
+  return mi_manage_os_memory_ex2(_mi_subproc(), start, size, numa_node, exclusive, false, memid, NULL, NULL, arena_id);
 }
 
 bool mi_manage_memory(void* start, size_t size, bool is_committed, bool is_pinned, bool is_zero, int numa_node, bool exclusive, mi_commit_fun_t* commit_fun, void* commit_fun_arg, mi_arena_id_t* arena_id) mi_attr_noexcept
@@ -1668,7 +1681,7 @@ bool mi_manage_memory(void* start, size_t size, bool is_committed, bool is_pinne
   memid.initially_committed = is_committed;
   memid.initially_zero = is_zero;
   memid.is_pinned = is_pinned;
-  return mi_manage_os_memory_ex2(_mi_subproc(), start, size, numa_node, exclusive, memid, commit_fun, commit_fun_arg, arena_id);
+  return mi_manage_os_memory_ex2(_mi_subproc(), start, size, numa_node, exclusive, false, memid, commit_fun, commit_fun_arg, arena_id);
 }
 
 
@@ -1679,7 +1692,7 @@ static int mi_reserve_os_memory_ex2(mi_subproc_t* subproc, size_t size, bool com
   mi_memid_t memid;
   void* start = _mi_os_alloc_aligned(size, MI_ARENA_SLICE_ALIGN, commit, allow_large, &memid);
   if (start == NULL) return ENOMEM;
-  if (!mi_manage_os_memory_ex2(subproc, start, size, -1 /* numa node */, exclusive, memid, NULL, NULL, arena_id)) {
+  if (!mi_manage_os_memory_ex2(subproc, start, size, -1 /* numa node */, exclusive, allow_large, memid, NULL, NULL, arena_id)) {
     _mi_os_free_ex(start, size, commit, memid, NULL);
     _mi_verbose_message("failed to reserve %zu KiB memory\n", _mi_divide_up(size, 1024));
     return ENOMEM;
@@ -1961,7 +1974,7 @@ int mi_reserve_huge_os_pages_at_ex(size_t pages, int numa_node, size_t timeout_m
   }
   _mi_verbose_message("numa node %i: reserved %zu GiB huge pages (of the %zu GiB requested)\n", numa_node, pages_reserved, pages);
 
-  if (!mi_manage_os_memory_ex2(_mi_subproc(), p, hsize, numa_node, exclusive, memid, NULL, NULL, arena_id)) {
+  if (!mi_manage_os_memory_ex2(_mi_subproc(), p, hsize, numa_node, exclusive, false, memid, NULL, NULL, arena_id)) {
     _mi_os_free(p, hsize, memid);
     return ENOMEM;
   }

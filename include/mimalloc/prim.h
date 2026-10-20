@@ -63,6 +63,9 @@ int _mi_prim_decommit(void* addr, size_t size, bool* needs_recommit);
 // Reset memory. The range keeps being accessible but the content might be reset to zero at any moment.
 // Returns error code or 0 on success.
 int _mi_prim_reset(void* addr, size_t size);
+#if defined(__linux__)
+int _mi_prim_avoid_large_pages(void* addr, size_t size);
+#endif
 
 // Reuse memory. This is called for memory that is already committed but
 // may have been reset (`_mi_prim_reset`) or decommitted (`_mi_prim_decommit`) where `needs_recommit` was false.

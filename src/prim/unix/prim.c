@@ -435,6 +435,17 @@ static void* unix_mmap(void* addr, size_t size, size_t try_alignment, int protec
   return p;
 }
 
+#if defined(__linux__)
+int _mi_prim_avoid_large_pages(void* addr, size_t size) {
+  #if defined(MADV_NOHUGEPAGE)
+  return unix_madvise(addr, size, MADV_NOHUGEPAGE);
+  #else
+  MI_UNUSED(addr); MI_UNUSED(size);
+  return 0;
+  #endif
+}
+#endif
+
 // Note: the `try_alignment` is just a hint and the returned pointer is not guaranteed to be aligned.
 int _mi_prim_alloc(void* hint_addr, size_t size, size_t try_alignment, bool commit, bool allow_large, bool* is_large, bool* is_zero, void** addr) {
   mi_assert_internal(size > 0 && (size % _mi_os_page_size()) == 0);

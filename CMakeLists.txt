@@ -801,6 +801,16 @@ if (MI_BUILD_TESTS)
     add_test(NAME test-${TEST_NAME} COMMAND mimalloc-test-${TEST_NAME})
   endforeach()
 
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(mimalloc-test-metadata test/test-metadata.c)
+    target_compile_definitions(mimalloc-test-metadata PRIVATE ${mi_defines})
+    target_compile_options(mimalloc-test-metadata PRIVATE ${mi_cflags})
+    target_include_directories(mimalloc-test-metadata PRIVATE include src)
+    target_link_libraries(mimalloc-test-metadata PRIVATE ${mi_libraries})
+    add_test(NAME test-metadata COMMAND mimalloc-test-metadata)
+    add_test(NAME test-metadata-deferred COMMAND ${CMAKE_COMMAND} -E env MIMALLOC_ARENA_EAGER_COMMIT=0 $<TARGET_FILE:mimalloc-test-metadata>)
+  endif()
+
   # dynamic override test
   if(MI_BUILD_SHARED AND NOT (MI_TRACK_ASAN OR MI_DEBUG_TSAN OR MI_DEBUG_UBSAN))
     add_executable(mimalloc-test-stress-dynamic test/test-stress.c)
